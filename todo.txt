@@ -1,0 +1,38 @@
+- ratings.csv, movies.csv, tags.csv 
+
+
+userid -> [movieid, timestamp, genres]
+sort by timestamp
+
+Represent each movie as a genre vector
+movie1 = [Action=1, Comedy=0, ....]
+Encode genres as smoothed probability distribution per movie
+P(g) = (count(g) + ε) / (total_genres + ε * num_genres)
+
+Compute similarity between i and i+1
+
+Drift occurs when similarity drops [> sigma + mu]
+
+
+Graphs to plot
+Graph 1 — Per-user drift timeline (primary plot)
+
+X-axis: Interaction index (chronological order of movies watched by the user)
+Y-axis: KL Divergence between item i and item i+1
+Plot a horizontal dashed line at θ_user = mean + σ
+Mark every point above the line as a drift point (red dot or vertical red line)
+
+Graph 2 — Genre distribution shift over time
+
+X-axis: Time window (e.g., year extracted from timestamp)
+Y-axis: Genre probability (proportion of ratings in that window belonging to each genre)
+Drift is visible as crossover or sudden shift in genre proportions
+
+Graph 3 — Drift point distribution across users
+
+X-axis: Number of drift points detected per user
+Y-axis: Number of users (histogram)
+
+
+
+
