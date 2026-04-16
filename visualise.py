@@ -15,7 +15,13 @@ def _save(fig: plt.Figure, filename: str):
 
 def plot_user_drift_timeline(drift_df: pd.DataFrame, user_id: int, save: bool = True):
     """
-    Plots a dashboard comparing all active drift detection methods for a single user.
+    Generates a multi-row dashboard for a single user, showing the drift score
+    timeline for every active method (e.g., GENRE_SHIFT_JSD, FCM_KL).
+    
+    Includes:
+    - Shaded area plots for the raw drift score.
+    - Red dots marking detected 'True Drift' points.
+    - Horizontal lines for user-specific detection thresholds.
     """
     user_data = drift_df[drift_df['userId'] == user_id].copy()
     if user_data.empty:
@@ -62,13 +68,17 @@ def plot_user_drift_timeline(drift_df: pd.DataFrame, user_id: int, save: bool = 
     plt.tight_layout()
     
     if save:
-        methods_str = "_".join(methods)
-        if len(methods_str) > 50: methods_str = "Comparison"
+        # Save the multi-panel dashboard for this user
         _save(fig, f'user_{user_id}_comparison_dashboard.png')
     else:
         plt.show()
 
 def plot_genre_shift_over_time(merged_data: pd.DataFrame, user_id: int, drift_df: pd.DataFrame = None, top_n: int = 5, save: bool = True):
+    """
+    Visualises top-level genre preferences changing year-over-year.
+    If 'drift_df' is provided, it marks the years where drift was detected 
+    with vertical dashed lines to correlate score spikes with genre proportion shifts.
+    """
     user_df = merged_data[merged_data['userId'] == user_id].copy()
     if user_df.empty:
         return
@@ -115,68 +125,11 @@ def plot_genre_shift_over_time(merged_data: pd.DataFrame, user_id: int, drift_df
     else:
         plt.show()
 
-def plot_drift_distribution(summary_all: pd.DataFrame, save: bool = True):
-    for method, summary in summary_all.groupby('method'):
-        fig, axes = plt.subplots(1, 2, figsize=(14, 5))
-    
-        ax = axes[0]
-        max_drifts = int(summary['num_drift_points'].max()) if not pd.isna(summary['num_drift_points'].max()) else 0
-        bins = min(40, max_drifts + 1)
-        ax.hist(summary['num_drift_points'], bins=bins, color='steelblue', edgecolor='white', linewidth=0.5)
-        mean_points = summary['num_drift_points'].mean()
-        median_points = summary['num_drift_points'].median()
-        ax.axvline(mean_points, color='red', linestyle='--', linewidth=1.5, label=f"Mean = {mean_points:.1f}")
-        ax.axvline(median_points, color='orange', linestyle=':', linewidth=1.5, label=f"Median = {median_points:.1f}")
-        ax.set_title('Distribution of Drift Events per User', fontsize=12, fontweight='bold')
-        ax.set_xlabel('Number of True Drift Events', fontsize=11)
-        ax.set_ylabel('Number of Users', fontsize=11)
-        ax.legend(fontsize=9)
-        ax.grid(True, alpha=0.3)
-    
-        ax = axes[1]
-        ax.hist(summary['drift_rate'], bins=30, color='darkorange', edgecolor='white', linewidth=0.5)
-        ax.axvline(summary['drift_rate'].mean(), color='red', linestyle='--', linewidth=1.5, label=f"Mean = {summary['drift_rate'].mean():.2%}")
-        ax.set_title('Distribution of Drift Pivot Rate\n(drift events / evaluated pivots)', fontsize=12, fontweight='bold')
-        ax.set_xlabel('Drift Rate', fontsize=11)
-        ax.set_ylabel('Number of Users', fontsize=11)
-        ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f'{x:.0%}'))
-        ax.legend(fontsize=9)
-        ax.grid(True, alpha=0.3)
-    
-        plt.suptitle(f'Population-level {method} Drift Analysis', fontsize=14, fontweight='bold', y=1.02)
-        plt.tight_layout()
-    
-        if save:
-            _save(fig, f'{method}_drift_distribution.png')
-        else:
-            plt.show()
-
-def plot_heatmap(drift_df_all: pd.DataFrame, top_n: int = 30, save: bool = True):
-    for method, drift_df in drift_df_all.groupby('method'):
-        top_users = drift_df.groupby('userId')['step'].count().nlargest(top_n).index.tolist()
-        subset = drift_df[drift_df['userId'].isin(top_users)]
-    
-        if subset.empty:
-            continue
-            
-        pivot = subset.pivot_table(index='userId', columns='step', values='score', aggfunc='first')
-    
-        fig, ax = plt.subplots(figsize=(16, max(6, top_n // 3)))
-        im = ax.imshow(pivot.values, aspect='auto', cmap='YlOrRd', interpolation='nearest')
-        plt.colorbar(im, ax=ax, label=f'{method} Score')
-    
-        ax.set_title(f'{method} Score Heatmap across Pivot Steps — Top {top_n} Active Users', fontsize=13, fontweight='bold')
-        ax.set_xlabel('Pivotal Interaction Step', fontsize=11)
-        ax.set_ylabel('User ID', fontsize=11)
-        ax.set_yticks(range(len(pivot.index)))
-        ax.set_yticklabels(pivot.index, fontsize=7)
-    
-        plt.tight_layout()
-    
-        if save:
-            _save(fig, f'{method}_heatmap_top_users.png')
-
 def plot_all(drift_df: pd.DataFrame, merged_data: pd.DataFrame, summary: pd.DataFrame, sample_users=None):
+    """
+    Main entry point for generating all requested visualisations.
+    Currently limited to individual user dashboards and genre shift timelines.
+    """
     if drift_df.empty:
         print("Empty drift data, skipping plots.")
         return
@@ -184,15 +137,10 @@ def plot_all(drift_df: pd.DataFrame, merged_data: pd.DataFrame, summary: pd.Data
     if sample_users == "all":
         sample_users = summary['userId'].unique().tolist()
     elif sample_users is None:
+        # If no samples specified, pick the top 10 most "drift-heavy" users
         sample_users = summary.head(10)['userId'].unique().tolist()
 
     print(f"\nPlotting Timeline & Shifts for users: {sample_users}")
     for uid in sample_users:
         plot_user_drift_timeline(drift_df, user_id=uid)
         plot_genre_shift_over_time(merged_data, user_id=uid, drift_df=drift_df)
-
-    print("\nPlotting Distribution...")
-    plot_drift_distribution(summary)
-
-    print("\nPlotting Heatmap...")
-    plot_heatmap(drift_df)

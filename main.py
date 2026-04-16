@@ -6,8 +6,21 @@ from preprocessing import load_and_prepare
 from drift_detection import compute_all_users_drift, flag_drift_points, get_drift_summary
 from visualise import plot_all
 
+"""
+DRIFT DETECTION PIPELINE
+------------------------
+This script is the main entry point for the analysis. 
+It follows a 6-step process:
+1. Load and merge raw CSV data.
+2. Transform ratings into 'Genre' or 'Taste' sequences.
+3. Compare 'Past' vs 'Future' behavior using a sliding window.
+4. Identify statistically significant 'Peaks' (True Drift).
+5. Save results to the 'data/' folder.
+6. Generate dashboards and genre shift timelines in the 'Plots/' folder.
+"""
+
 # ─────────────────────────────────────────────
-# CONFIG
+# CONFIGURATION
 # ─────────────────────────────────────────────
 
 DATASET_PATH   = 'data/ml-latest-small'
@@ -33,7 +46,7 @@ merged_data, all_genres = load_and_prepare(DATASET_PATH)
 
 if MAX_USERS is not None:
     valid_users = merged_data['userId'].unique()[:MAX_USERS]
-    merged_data = merged_data[merged_data['userId'].isin(valid_users)]
+    merged_data = merged_data.loc[merged_data['userId'].isin(valid_users)].copy()
 
 print(f"Merged data shape  : {merged_data.shape}")
 print(f"Unique users       : {merged_data['userId'].nunique()}")
@@ -126,6 +139,6 @@ if not drift_df.empty:
         sample_users = SAMPLE_USERS
     )
 
-print("\n" + "=" * 50)
-print("Pipeline complete.")
-print("=" * 50)
+print("=" * 60)
+print("   PIPELINE COMPLETE: All results generated and saved.    ")
+print("=" * 60)

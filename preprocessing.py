@@ -1,12 +1,14 @@
 import pandas as pd
 import numpy as np
 import os
+from typing import Any, Tuple, List
 
-def genre_to_binary_vector(genre_string, all_genres):
+def genre_to_binary_vector(genre_string: str, all_genres: list) -> np.ndarray:
     """
-    Convert a genre string 'Action|Comedy' into a binary occurrence vector
-    [1, 0, 1, ...] based on the ordered all_genres list.
-    No probabilities or smoothing applied here.
+    Converts a pipe-separated genre string into a fixed-length binary vector.
+    Example: 'Action|Sci-Fi' -> [1, 0, 0, 1, 0...]
+    
+    No probabilities or smoothing are applied at this stage.
     """
     if pd.isna(genre_string) or genre_string == '(no genres listed)':
         movie_genres = []
@@ -16,9 +18,13 @@ def genre_to_binary_vector(genre_string, all_genres):
     count_vector = np.array([1.0 if g in movie_genres else 0.0 for g in all_genres])
     return count_vector
 
-def load_and_prepare(dataset_path):
+def load_and_prepare(dataset_path: str) -> Tuple[pd.DataFrame, List[str]]:
+    """
+    Loads ratings and movies, merges them, and generates a genre vector for every interaction.
+    Sorts result chronologically by user.
+    """
     # Load MovieLens ratings and genres
-    base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    base_dir = os.path.dirname(os.path.abspath(__file__))
     
     genres = pd.read_csv(os.path.join(base_dir, dataset_path, 'movies.csv'))
     ratings = pd.read_csv(os.path.join(base_dir, dataset_path, 'ratings.csv'))

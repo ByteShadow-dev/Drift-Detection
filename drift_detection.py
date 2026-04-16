@@ -13,9 +13,20 @@ METRIC_MAP = {
     'KL': compute_kl
 }
 
-def get_user_representations(user_df: pd.DataFrame, representation: str = 'GENRE_SHIFT', n_clusters: int = 3, m: float = 2.0, learning_rate: float = 0.05) -> np.ndarray:
+def get_user_representations(user_df: pd.DataFrame, representation: str = 'GENRE_SHIFT', n_clusters: int = 6, m: float = 1.5, learning_rate: float = 0.1, n_warmup_epochs: int = 5) -> np.ndarray:
     """
-    Transforms raw user interactions into a stream of semantic probability vectors.
+    TRANSFORMATION LOGIC
+    --------------------
+    Converts raw movie ratings into a mathematical sequence we can measure.
+
+    Modes:
+    1. GENRE_SHIFT (Simple): 
+       Uses the genres of the movies directly (Action=1, Comedy=1).
+       
+    2. FCM_CLUSTERS (Advanced): 
+       Learns representative 'Taste Clusters' (centroids) for the user. 
+       A movie is then represented as a 1 or 0 depending on which taste cluster 
+       it fits best. This captures semantic patterns that raw genres sometimes miss.
     """
     total_len = len(user_df)
     data = np.vstack(user_df['genre_vector'].values)
@@ -31,30 +42,68 @@ def get_user_representations(user_df: pd.DataFrame, representation: str = 'GENRE
         rng = np.random.default_rng(42)
         init_indices = rng.choice(total_len, size=n_clusters, replace=False)
         centroids = data[init_indices].astype(float)
-        
-        memberships = []
+
+        # ── Warm-up phase ──────────────────────────────────────────────────────
+        # Run centroid updates over the full sequence n_warmup_epochs times so
+        # the centroids converge to stable, representative taste clusters BEFORE
+        # we record any memberships for drift scoring.
+        for _ in range(n_warmup_epochs):
+            for i in range(total_len):
+                x_t = data[i].astype(float)
+                d = np.linalg.norm(centroids - x_t, axis=1)
+                d = np.maximum(d, 1e-10)
+                u_w = np.array([
+                    1.0 / np.sum((d[k] / d) ** (2 / (m - 1)))
+                    for k in range(n_clusters)
+                ])
+                for k in range(n_clusters):
+                    centroids[k] += learning_rate * (u_w[k] ** m) * (x_t - centroids[k])
+
+        # ── Inference Pass (Feature Extraction) ───────────────────────────────
+        # Now we record the cluster assignments for the drift analysis.
+        # We continue to update centroids (online learning) so the taste model
+        # can adapt to very slow, long-term global trends.
+        #
+        # CRITICAL: We convert soft memberships [0.2, 0.7, 0.1] to HARD one-hot
+        # vectors [0, 1, 0]. Soft memberships are "dense" (all bins > 0), which
+        # causes JSD and KL to produce perfectly proportional, identical curves.
+        # Hard assignments provide the category sparsity needed for non-linear
+        # metric behaviors to manifest.
+        assignments = []
         for i in range(total_len):
             x_t = data[i].astype(float)
-            distances = np.linalg.norm(centroids - x_t, axis=1)
-            distances = np.maximum(distances, 1e-10)
             
+            # 1. Compute distances to centroids
+            distances = np.linalg.norm(centroids - x_t, axis=1)
+            distances = np.maximum(distances, 1e-10) # Avoid division by zero
+            
+            # 2. Derive soft membership weights (U)
             u = np.zeros(n_clusters)
             for k in range(n_clusters):
                 u[k] = 1.0 / np.sum((distances[k] / distances) ** (2 / (m - 1)))
-                
-            memberships.append(u)
             
-            # Update sequence centroids
+            # 3. Apply Hard Assignment (winner-take-all) for sparsity
+            hard = np.zeros(n_clusters)
+            hard[np.argmax(u)] = 1.0
+            assignments.append(hard)
+            
+            # 4. Perform Online Update of the taste model
             for k in range(n_clusters):
                 centroids[k] += learning_rate * (u[k] ** m) * (x_t - centroids[k])
                 
-        return np.array(memberships)
+        return np.array(assignments)
     else:
         raise ValueError(f"Unknown representation mode: {representation}")
 
 def get_window_distribution(data_vectors: np.ndarray, start_idx: int, end_idx: int, epsilon=0.001) -> np.ndarray:
     """
     Given a user's transformed vectors, sum slice [start_idx : end_idx], smooth, and normalize.
+
+    Both GENRE_SHIFT (binary genre vectors) and FCM_CLUSTERS (hard one-hot cluster
+    assignments) produce sparse vectors with real zeros.  Summing across a window
+    then adding epsilon creates distributions with near-zero bins for unrepresented
+    categories — this is exactly the sparsity that makes JSD and KL produce
+    genuinely different curve shapes.
     """
     slice_data = data_vectors[start_idx:end_idx]
     window_sum = slice_data.sum(axis=0)
@@ -73,11 +122,16 @@ def compute_user_drift_sequence(user_df: pd.DataFrame, data_vectors: np.ndarray,
         
     metric_fn = METRIC_MAP.get(metric.upper(), compute_jsd)
     user_id = user_df['userId'].iloc[0]
-    
+
+    # The loop moves the 'pivot' point forward through time.
+    # At every step, we look at:
+    # 1. Past window:  [pivot - window_size  TO  pivot]
+    # 2. Future window: [pivot  TO  pivot + window_size]
     for i in range(window_size, total_len - window_size + 1):
         p_past = get_window_distribution(data_vectors, i - window_size, i)
         p_future = get_window_distribution(data_vectors, i, i + window_size)
         
+        # Calculate how different the 'Past' and 'Future' are
         score = metric_fn(p_past, p_future)
         
         results.append({
