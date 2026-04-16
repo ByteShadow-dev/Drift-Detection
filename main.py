@@ -53,21 +53,9 @@ if MAX_USERS is not None:
     
     # 2. If specific users were requested in SAMPLE_USERS, make sure they are included
     if isinstance(SAMPLE_USERS, list):
-        # Ensure IDs are matching the data type (conversion from string if needed)
-        id_type = merged_data['userId'].dtype
-        target_ids = []
         for uid in SAMPLE_USERS:
-            try:
-                target_ids.append(id_type.type(uid))
-            except ValueError:
-                print(f"Warning: Could not convert user ID '{uid}' to {id_type}")
-        
-        for uid in target_ids:
             if uid not in valid_users:
                 valid_users.append(uid)
-        
-        # Update SAMPLE_USERS to the converted list so that plot_all receives the correct types
-        SAMPLE_USERS = target_ids
                 
     # 3. Filter the dataset to only include these users
     merged_data = merged_data.loc[merged_data['userId'].isin(valid_users)].copy()

@@ -142,8 +142,5 @@ def plot_all(drift_df: pd.DataFrame, merged_data: pd.DataFrame, summary: pd.Data
 
     print(f"\nPlotting Timeline & Shifts for users: {sample_users}")
     for uid in sample_users:
-        if uid not in drift_df['userId'].unique():
-            print(f"Skipping Plot for User {uid}: Not enough data for drift comparison (less than 2*WINDOW_SIZE ratings).")
-            continue
         plot_user_drift_timeline(drift_df, user_id=uid)
         plot_genre_shift_over_time(merged_data, user_id=uid, drift_df=drift_df)
