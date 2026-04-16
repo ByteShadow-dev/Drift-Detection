@@ -27,8 +27,11 @@ DATASET_PATH   = 'data/ml-latest-small'
 WINDOW_SIZE    = 20
 ACTIVE_REPRESENTATIONS = ['GENRE_SHIFT', 'FCM_CLUSTERS'] # Options: GENRE_SHIFT, FCM_CLUSTERS
 ACTIVE_METRICS         = ['JSD', 'KL']            # Options: JSD, EMD, HELLINGER, TVD, COSINE, KL
-SAMPLE_USERS   = None    # None = auto pick top 10 by drift count
-MAX_USERS      = 50      # Limit the number of users to speed up execution. Set to None for all users.
+SAMPLE_USERS   = [123, 555, 420]   # Set to a list of IDs for specific plots, e.g. [1, 5, 10]. 
+                        # None = automatically pick top 10 users with most drift.
+                        # "all" = plot every single user.
+MAX_USERS      = 50     # Limit the total number of users processed to speed up execution. 
+                        # Set to None for all users.
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_OUT_DIR = os.path.join(SCRIPT_DIR, 'data')
@@ -45,7 +48,28 @@ print("=" * 50)
 merged_data, all_genres = load_and_prepare(DATASET_PATH)
 
 if MAX_USERS is not None:
-    valid_users = merged_data['userId'].unique()[:MAX_USERS]
+    # 1. Get the first N unique users
+    valid_users = list(merged_data['userId'].unique()[:MAX_USERS])
+    
+    # 2. If specific users were requested in SAMPLE_USERS, make sure they are included
+    if isinstance(SAMPLE_USERS, list):
+        # Ensure IDs are matching the data type (conversion from string if needed)
+        id_type = merged_data['userId'].dtype
+        target_ids = []
+        for uid in SAMPLE_USERS:
+            try:
+                target_ids.append(id_type.type(uid))
+            except ValueError:
+                print(f"Warning: Could not convert user ID '{uid}' to {id_type}")
+        
+        for uid in target_ids:
+            if uid not in valid_users:
+                valid_users.append(uid)
+        
+        # Update SAMPLE_USERS to the converted list so that plot_all receives the correct types
+        SAMPLE_USERS = target_ids
+                
+    # 3. Filter the dataset to only include these users
     merged_data = merged_data.loc[merged_data['userId'].isin(valid_users)].copy()
 
 print(f"Merged data shape  : {merged_data.shape}")
