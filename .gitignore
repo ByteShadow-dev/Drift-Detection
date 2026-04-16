@@ -1,0 +1,5 @@
+Plots/
+data/
+__pycache__/
+*.csv
+*.png
