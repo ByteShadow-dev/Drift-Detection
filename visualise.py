@@ -40,7 +40,7 @@ def plot_user_drift_timeline(drift_df: pd.DataFrame, user_id: int, save: bool = 
         user_df = user_data[user_data['method'] == method]
         
         threshold = user_df['threshold'].iloc[0]
-        mean_val = user_df['mean'].iloc[0]
+        mean_val = user_df['score'].mean()
         steps = user_df['step'].values
         scores = user_df['score'].values
         drift_mask = user_df['is_drift'].values

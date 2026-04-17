@@ -163,46 +163,52 @@ def compute_all_users_drift(merged_data: pd.DataFrame, window_size: int = 40, me
     
     return drift_df
 
-def flag_drift_points(drift_df: pd.DataFrame, std_multiplier: float = 2.0) -> pd.DataFrame:
+# --- MODIFIED FUNCTION ---
+def flag_drift_points(drift_df: pd.DataFrame, std_multiplier: float = 2.0, rolling_window: int = 30) -> pd.DataFrame: # CHANGED: Added rolling_window param
     """
-    Calculate user-specific thresholds to find the true macroscopic shifts 
-    relative to their baseline fluctuation.
-    Uses Peak Detection (find_peaks) so that a prolonged hill of high score
-    is reduced to just its single highest peak point.
+    Calculate local rolling thresholds to find macroscopic shifts relative to 
+    neighboring fluctuations.
     """
     if drift_df.empty:
         return drift_df
-        
-    user_stats = drift_df.groupby(['userId', 'method'])['score'].agg(
-        mean='mean',
-        std=lambda x: x.std(ddof=1)
-    ).reset_index()
+
+    # CHANGED: Logic below replaces the static global mean/std calculation
+    # window size is (2 * rolling_window + 1) to account for [t-rolling_window, t+rolling_window]
+    full_window = (2 * rolling_window) + 1
     
-    # If standard deviation is NaN (only 1 datapoint), fill with 0
-    user_stats['std'] = user_stats['std'].fillna(0)
-    user_stats['threshold'] = user_stats['mean'] + (std_multiplier * user_stats['std'])
+    drift_df = drift_df.sort_values(['userId', 'method', 'step'])
     
-    drift_df = drift_df.merge(user_stats, on=['userId', 'method'])
+    # CHANGED: Added rolling calculation per user/method group
+    grouped = drift_df.groupby(['userId', 'method'])['score']
+    
+    drift_df['rolling_mean'] = grouped.transform(
+        lambda x: x.rolling(window=full_window, center=True, min_periods=1).mean()
+    )
+    drift_df['rolling_std'] = grouped.transform(
+        lambda x: x.rolling(window=full_window, center=True, min_periods=1).std()
+    ).fillna(0)
+    
+    # CHANGED: Threshold is now an array of values (local to each point)
+    drift_df['threshold'] = drift_df['rolling_mean'] + (std_multiplier * drift_df['rolling_std'])
     drift_df['is_drift'] = False
     
     # Apply find_peaks per user and method
     for (user_id, method), group in drift_df.groupby(['userId', 'method']):
         scores = group['score'].values
-        threshold = group['threshold'].iloc[0]
+        thresholds = group['threshold'].values # CHANGED: Using the full array of thresholds
         
-        # We enforce a distance so that a single broad drift event doesn't yield multiple nearby peaks.
-        peaks, _ = find_peaks(scores, height=threshold, distance=15)
+        # CHANGED: scipy.signal.find_peaks height parameter now receives the thresholds array
+        peaks, _ = find_peaks(scores, height=thresholds, distance=15)
         
-        # Map the local chunk index back to the global dataframe index
         global_indices = group.index[peaks]
         drift_df.loc[global_indices, 'is_drift'] = True
     
     total_drift_points = drift_df['is_drift'].sum()
-    total_transitions = len(drift_df)
-    print(f"Flagged {int(total_drift_points)} isolated drift peaks out of {total_transitions} valid window comparisons.")
+    print(f"Flagged {int(total_drift_points)} isolated drift peaks using rolling threshold.") # CHANGED: Updated log message
     
     return drift_df
 
+# --- MODIFIED FUNCTION ---
 def get_drift_summary(drift_df: pd.DataFrame) -> pd.DataFrame:
     summary = (
         drift_df
@@ -211,9 +217,9 @@ def get_drift_summary(drift_df: pd.DataFrame) -> pd.DataFrame:
             num_movies       = ('num_movies',  'first'),
             num_comparisons  = ('step',        'count'),
             num_drift_points = ('is_drift',    'sum'),
-            mean_score       = ('mean',        'first'),
-            std_score        = ('std',         'first'),
-            threshold        = ('threshold',   'first'),
+            avg_threshold    = ('threshold',   'mean'),  # CHANGED: threshold is no longer 'first' (static) but 'mean' (local avg)
+            mean_score       = ('score',       'mean'),  # CHANGED: referencing the raw score column
+            std_score        = ('score',       'std'),   # CHANGED: referencing the raw score column
         )
         .reset_index()
     )
