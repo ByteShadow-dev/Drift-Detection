@@ -29,7 +29,7 @@ def load_and_prepare(dataset_path: str) -> Tuple[pd.DataFrame, List[str]]:
     genres = pd.read_csv(os.path.join(base_dir, dataset_path, 'movies.csv'))
     ratings = pd.read_csv(os.path.join(base_dir, dataset_path, 'ratings.csv'))
     
-    merged_data = ratings.merge(genres[['movieId', 'genres']], on='movieId', how='left')
+    merged_data = ratings.merge(genres[['movieId', 'title', 'genres']], on='movieId', how='left')
     merged_data['date'] = pd.to_datetime(merged_data['timestamp'], unit='s')
     
     all_genres = genres['genres'].str.split('|').explode().unique()

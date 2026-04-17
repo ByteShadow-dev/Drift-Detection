@@ -63,12 +63,6 @@ def get_user_representations(user_df: pd.DataFrame, representation: str = 'GENRE
         # Now we record the cluster assignments for the drift analysis.
         # We continue to update centroids (online learning) so the taste model
         # can adapt to very slow, long-term global trends.
-        #
-        # CRITICAL: We convert soft memberships [0.2, 0.7, 0.1] to HARD one-hot
-        # vectors [0, 1, 0]. Soft memberships are "dense" (all bins > 0), which
-        # causes JSD and KL to produce perfectly proportional, identical curves.
-        # Hard assignments provide the category sparsity needed for non-linear
-        # metric behaviors to manifest.
         assignments = []
         for i in range(total_len):
             x_t = data[i].astype(float)
@@ -81,13 +75,9 @@ def get_user_representations(user_df: pd.DataFrame, representation: str = 'GENRE
             u = np.zeros(n_clusters)
             for k in range(n_clusters):
                 u[k] = 1.0 / np.sum((distances[k] / distances) ** (2 / (m - 1)))
+            assignments.append(u)
             
-            # 3. Apply Hard Assignment (winner-take-all) for sparsity
-            hard = np.zeros(n_clusters)
-            hard[np.argmax(u)] = 1.0
-            assignments.append(hard)
-            
-            # 4. Perform Online Update of the taste model
+            # 3. Perform Online Update of the taste model
             for k in range(n_clusters):
                 centroids[k] += learning_rate * (u[k] ** m) * (x_t - centroids[k])
                 
@@ -96,15 +86,6 @@ def get_user_representations(user_df: pd.DataFrame, representation: str = 'GENRE
         raise ValueError(f"Unknown representation mode: {representation}")
 
 def get_window_distribution(data_vectors: np.ndarray, start_idx: int, end_idx: int, epsilon=0.001) -> np.ndarray:
-    """
-    Given a user's transformed vectors, sum slice [start_idx : end_idx], smooth, and normalize.
-
-    Both GENRE_SHIFT (binary genre vectors) and FCM_CLUSTERS (hard one-hot cluster
-    assignments) produce sparse vectors with real zeros.  Summing across a window
-    then adding epsilon creates distributions with near-zero bins for unrepresented
-    categories — this is exactly the sparsity that makes JSD and KL produce
-    genuinely different curve shapes.
-    """
     slice_data = data_vectors[start_idx:end_idx]
     window_sum = slice_data.sum(axis=0)
     smoothed = window_sum + epsilon
@@ -138,6 +119,9 @@ def compute_user_drift_sequence(user_df: pd.DataFrame, data_vectors: np.ndarray,
             'userId': user_id,
             'step': i,
             'timestamp_i': user_df['timestamp'].iloc[i],
+            'movieId_i': user_df['movieId'].iloc[i],
+            'title_i': user_df['title'].iloc[i] if 'title' in user_df.columns else np.nan,
+            'genres_i': user_df['genres'].iloc[i] if 'genres' in user_df.columns else np.nan,
             'score': score,
             'method': method_name
         })
@@ -173,33 +157,6 @@ def flag_drift_points(
 ) -> pd.DataFrame:
     """
     Detect statistically significant drift peaks using a causal rolling threshold.
-
-    Improvements over the previous version
-    ---------------------------------------
-    FIX 1 — No lookahead bias:
-        Rolling mean/std now use a trailing window (center=False). The threshold at
-        step t is computed only from steps [t-window, t], so the detector cannot
-        "see" future spikes when deciding whether the current point is anomalous.
-
-    FIX 2 — Std floor prevents over-flagging in flat regions:
-        When a user watches many similar movies in a row the rolling std collapses
-        to zero, making the threshold equal to the mean and causing any tiny
-        fluctuation to be flagged. We enforce a minimum std of
-        (std_floor_factor * global_std_for_that_series), keeping the bar
-        proportionally high even in calm stretches.
-
-    FIX 3 — Adaptive peak spacing scales with sequence length:
-        The minimum gap between accepted peaks (distance parameter in find_peaks)
-        is now max(window_size, seq_len // 15) instead of a hardcoded 15.
-        This avoids over-suppression for short sequences and under-suppression for
-        long ones.
-
-    FIX 4 — Prominence filter removes broad hills:
-        A score can exceed the threshold but still be part of a slow, gradual hill
-        rather than a sharp behavioural event. Adding prominence=(prominence_factor
-        * local_std) ensures every accepted peak stands out clearly above its
-        immediate neighbours, not just above the rolling baseline.
-
     Parameters
     ----------
     drift_df         : DataFrame from compute_all_users_drift / concat of multiple.
@@ -217,7 +174,6 @@ def flag_drift_points(
 
     grouped = drift_df.groupby(['userId', 'method'])['score']
 
-    # ── FIX 1: Trailing window only (center=False) — no lookahead ─────────────
     drift_df['rolling_mean'] = grouped.transform(
         lambda x: x.rolling(window=rolling_window, center=False, min_periods=5).mean()
     )
@@ -225,19 +181,16 @@ def flag_drift_points(
         lambda x: x.rolling(window=rolling_window, center=False, min_periods=5).std()
     ).fillna(0)
 
-    # ── FIX 2: Enforce a std floor so flat regions don't over-flag ────────────
     global_std = grouped.transform('std').fillna(0)
     std_floor  = std_floor_factor * global_std
     drift_df['rolling_std'] = rolling_std_raw.clip(lower=std_floor)
 
-    # Fill any NaN rolling_mean (early steps before min_periods) with global mean
     global_mean = grouped.transform('mean')
     drift_df['rolling_mean'] = drift_df['rolling_mean'].fillna(global_mean)
 
     drift_df['threshold'] = drift_df['rolling_mean'] + (std_multiplier * drift_df['rolling_std'])
     drift_df['is_drift']  = False
 
-    # ── FIX 3 & 4: Adaptive distance + prominence per user/method group ───────
     for (user_id, method), group in drift_df.groupby(['userId', 'method']):
         scores     = group['score'].values
         thresholds = group['threshold'].values
