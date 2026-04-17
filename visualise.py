@@ -2,12 +2,16 @@ import os
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+from matplotlib.lines import Line2D
+from matplotlib.figure import Figure
+from matplotlib.ticker import FuncFormatter, MaxNLocator
+from typing import Optional
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PLOTS_DIR = os.path.join(SCRIPT_DIR, "Plots")
 os.makedirs(PLOTS_DIR, exist_ok=True)
 
-def _save(fig: plt.Figure, filename: str):
+def _save(fig: Figure, filename: str):
     path = os.path.join(PLOTS_DIR, filename)
     fig.savefig(path, dpi=150, bbox_inches='tight')
     plt.close(fig)
@@ -27,7 +31,9 @@ def plot_user_drift_timeline(drift_df: pd.DataFrame, user_id: int, save: bool = 
     if user_data.empty:
         return
 
-    methods = user_data['method'].unique()
+    user_data = user_data.sort_values(['method', 'step']).reset_index(drop=True)
+
+    methods = sorted(user_data['method'].unique())
     n_methods = len(methods)
     
     # Create subplots for each method to compare them side-by-side
@@ -37,13 +43,13 @@ def plot_user_drift_timeline(drift_df: pd.DataFrame, user_id: int, save: bool = 
         
     for i, method in enumerate(methods):
         ax = axes[i]
-        user_df = user_data[user_data['method'] == method]
-        
-        threshold = user_df['threshold'].iloc[0]
+        user_df = user_data[user_data['method'] == method].sort_values('step')
+
         mean_val = user_df['score'].mean()
         steps = user_df['step'].values
         scores = user_df['score'].values
         drift_mask = user_df['is_drift'].values
+        threshold_curve = user_df['threshold'].values if 'threshold' in user_df.columns else np.full_like(scores, fill_value=np.nan, dtype=float)
     
         ax.plot(steps, scores, color='steelblue', linewidth=1.5, alpha=0.8, zorder=2, label=f'{method} Score')
         ax.fill_between(steps, scores, alpha=0.08, color='steelblue')
@@ -51,8 +57,9 @@ def plot_user_drift_timeline(drift_df: pd.DataFrame, user_id: int, save: bool = 
         drift_steps = steps[drift_mask]
         drift_scores = scores[drift_mask]
         ax.scatter(drift_steps, drift_scores, color='red', s=40, zorder=5, label=f'Drift peaks ({drift_mask.sum()})', edgecolors='darkred', linewidths=0.5)
-    
-        ax.axhline(threshold, color='red', linestyle='--', linewidth=1.2, alpha=0.7, label=f'Threshold')
+
+        if np.isfinite(threshold_curve).any():
+            ax.plot(steps, threshold_curve, color='red', linestyle='--', linewidth=1.2, alpha=0.7, label='Threshold')
         ax.axhline(mean_val, color='orange', linestyle=':', linewidth=1.2, label=f'Mean')
     
         for ds in drift_steps:
@@ -73,7 +80,7 @@ def plot_user_drift_timeline(drift_df: pd.DataFrame, user_id: int, save: bool = 
     else:
         plt.show()
 
-def plot_genre_shift_over_time(merged_data: pd.DataFrame, user_id: int, drift_df: pd.DataFrame = None, top_n: int = 5, save: bool = True):
+def plot_genre_shift_over_time(merged_data: pd.DataFrame, user_id: int, drift_df: Optional[pd.DataFrame] = None, top_n: int = 5, save: bool = True):
     """
     Visualises top-level genre preferences changing year-over-year.
     If 'drift_df' is provided, it marks the years where drift was detected 
@@ -83,21 +90,28 @@ def plot_genre_shift_over_time(merged_data: pd.DataFrame, user_id: int, drift_df
     if user_df.empty:
         return
 
+    user_df = user_df.sort_values('timestamp').reset_index(drop=True)
+
     # Convert timestamp to Year
     user_df['year'] = pd.to_datetime(user_df['timestamp'], unit='s').dt.year
     user_df = user_df.assign(genre=user_df['genres'].str.split('|')).explode('genre')
     user_df = user_df[user_df['genre'] != '(no genres listed)']
 
-    genre_year = user_df.groupby(['year', 'genre']).size().reset_index(name='count')
+    genre_year = user_df.groupby(['year', 'genre']).size().rename('count').reset_index()
     total_per_year = genre_year.groupby('year')['count'].transform('sum')
     genre_year['proportion'] = genre_year['count'] / total_per_year
 
     top_genres = genre_year.groupby('genre')['count'].sum().nlargest(top_n).index.tolist()
     genre_year = genre_year[genre_year['genre'].isin(top_genres)]
     pivot = genre_year.pivot(index='year', columns='genre', values='proportion').fillna(0)
+    pivot = pivot.sort_index()
+
+    if pivot.empty:
+        return
 
     fig, ax = plt.subplots(figsize=(14, 5))
-    colors = plt.cm.tab10.colors
+    cmap = plt.get_cmap('tab10')
+    colors = [cmap(i) for i in range(10)]
     for i, genre in enumerate(pivot.columns):
         ax.plot(pivot.index, pivot[genre], marker='o', linewidth=2, label=genre, color=colors[i % len(colors)])
 
@@ -107,16 +121,23 @@ def plot_genre_shift_over_time(merged_data: pd.DataFrame, user_id: int, drift_df
         for dy in drift_years:
             ax.axvline(dy, color='red', linestyle='--', alpha=0.4, linewidth=1.2)
         if len(drift_years) > 0:
-            ax.axvline(np.nan, color='red', linestyle='--', alpha=0.6, linewidth=1.2, label='Drift pivot year')
+            drift_proxy = Line2D([0], [0], color='red', linestyle='--', alpha=0.6, linewidth=1.2, label='Drift pivot year')
+            handles, labels = ax.get_legend_handles_labels()
+            handles.append(drift_proxy)
+            labels.append('Drift pivot year')
+            ax.legend(handles, labels, fontsize=9, bbox_to_anchor=(1.01, 1), loc='upper left')
+        else:
+            ax.legend(fontsize=9, bbox_to_anchor=(1.01, 1), loc='upper left')
+    else:
+        ax.legend(fontsize=9, bbox_to_anchor=(1.01, 1), loc='upper left')
 
     ax.set_title(f'User {user_id} — Genre Preference Shift Over Time\n(Top {top_n} genres)', fontsize=13, fontweight='bold')
     ax.set_xlabel('Year', fontsize=11)
     ax.set_ylabel('Proportion of Ratings', fontsize=11)
-    ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda y, _: f'{y:.0%}'))
-    ax.legend(fontsize=9, bbox_to_anchor=(1.01, 1), loc='upper left')
+    ax.yaxis.set_major_formatter(FuncFormatter(lambda y, _: f'{y:.0%}'))
     ax.grid(True, alpha=0.3)
     # Ensure x-axis shows integers representing years
-    ax.xaxis.set_major_locator(plt.MaxNLocator(integer=True))
+    ax.xaxis.set_major_locator(MaxNLocator(integer=True))
 
     plt.tight_layout()
 

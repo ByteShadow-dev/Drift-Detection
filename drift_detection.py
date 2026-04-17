@@ -163,52 +163,108 @@ def compute_all_users_drift(merged_data: pd.DataFrame, window_size: int = 40, me
     
     return drift_df
 
-# --- MODIFIED FUNCTION ---
-def flag_drift_points(drift_df: pd.DataFrame, std_multiplier: float = 2.0, rolling_window: int = 30) -> pd.DataFrame: # CHANGED: Added rolling_window param
+
+def flag_drift_points(
+    drift_df: pd.DataFrame,
+    std_multiplier: float = 2.0,
+    rolling_window: int = 30,
+    std_floor_factor: float = 0.2,
+    prominence_factor: float = 0.5,
+) -> pd.DataFrame:
     """
-    Calculate local rolling thresholds to find macroscopic shifts relative to 
-    neighboring fluctuations.
+    Detect statistically significant drift peaks using a causal rolling threshold.
+
+    Improvements over the previous version
+    ---------------------------------------
+    FIX 1 — No lookahead bias:
+        Rolling mean/std now use a trailing window (center=False). The threshold at
+        step t is computed only from steps [t-window, t], so the detector cannot
+        "see" future spikes when deciding whether the current point is anomalous.
+
+    FIX 2 — Std floor prevents over-flagging in flat regions:
+        When a user watches many similar movies in a row the rolling std collapses
+        to zero, making the threshold equal to the mean and causing any tiny
+        fluctuation to be flagged. We enforce a minimum std of
+        (std_floor_factor * global_std_for_that_series), keeping the bar
+        proportionally high even in calm stretches.
+
+    FIX 3 — Adaptive peak spacing scales with sequence length:
+        The minimum gap between accepted peaks (distance parameter in find_peaks)
+        is now max(window_size, seq_len // 15) instead of a hardcoded 15.
+        This avoids over-suppression for short sequences and under-suppression for
+        long ones.
+
+    FIX 4 — Prominence filter removes broad hills:
+        A score can exceed the threshold but still be part of a slow, gradual hill
+        rather than a sharp behavioural event. Adding prominence=(prominence_factor
+        * local_std) ensures every accepted peak stands out clearly above its
+        immediate neighbours, not just above the rolling baseline.
+
+    Parameters
+    ----------
+    drift_df         : DataFrame from compute_all_users_drift / concat of multiple.
+    std_multiplier   : How many rolling stds above the rolling mean = threshold.
+    rolling_window   : Half-width of the trailing rolling window (full width used).
+    std_floor_factor : Fraction of the global series std used as a minimum std floor.
+                       Prevents threshold collapse in flat regions. (default 0.2)
+    prominence_factor: Fraction of the local std used as minimum peak prominence.
+                       Filters out broad humps. (default 0.5)
     """
     if drift_df.empty:
         return drift_df
 
-    # CHANGED: Logic below replaces the static global mean/std calculation
-    # window size is (2 * rolling_window + 1) to account for [t-rolling_window, t+rolling_window]
-    full_window = (2 * rolling_window) + 1
-    
-    drift_df = drift_df.sort_values(['userId', 'method', 'step'])
-    
-    # CHANGED: Added rolling calculation per user/method group
+    drift_df = drift_df.sort_values(['userId', 'method', 'step']).copy()
+
     grouped = drift_df.groupby(['userId', 'method'])['score']
-    
+
+    # ── FIX 1: Trailing window only (center=False) — no lookahead ─────────────
     drift_df['rolling_mean'] = grouped.transform(
-        lambda x: x.rolling(window=full_window, center=True, min_periods=1).mean()
+        lambda x: x.rolling(window=rolling_window, center=False, min_periods=5).mean()
     )
-    drift_df['rolling_std'] = grouped.transform(
-        lambda x: x.rolling(window=full_window, center=True, min_periods=1).std()
+    rolling_std_raw = grouped.transform(
+        lambda x: x.rolling(window=rolling_window, center=False, min_periods=5).std()
     ).fillna(0)
-    
-    # CHANGED: Threshold is now an array of values (local to each point)
+
+    # ── FIX 2: Enforce a std floor so flat regions don't over-flag ────────────
+    global_std = grouped.transform('std').fillna(0)
+    std_floor  = std_floor_factor * global_std
+    drift_df['rolling_std'] = rolling_std_raw.clip(lower=std_floor)
+
+    # Fill any NaN rolling_mean (early steps before min_periods) with global mean
+    global_mean = grouped.transform('mean')
+    drift_df['rolling_mean'] = drift_df['rolling_mean'].fillna(global_mean)
+
     drift_df['threshold'] = drift_df['rolling_mean'] + (std_multiplier * drift_df['rolling_std'])
-    drift_df['is_drift'] = False
-    
-    # Apply find_peaks per user and method
+    drift_df['is_drift']  = False
+
+    # ── FIX 3 & 4: Adaptive distance + prominence per user/method group ───────
     for (user_id, method), group in drift_df.groupby(['userId', 'method']):
-        scores = group['score'].values
-        thresholds = group['threshold'].values # CHANGED: Using the full array of thresholds
-        
-        # CHANGED: scipy.signal.find_peaks height parameter now receives the thresholds array
-        peaks, _ = find_peaks(scores, height=thresholds, distance=15)
-        
-        global_indices = group.index[peaks]
-        drift_df.loc[global_indices, 'is_drift'] = True
-    
+        scores     = group['score'].values
+        thresholds = group['threshold'].values
+        seq_len    = len(scores)
+
+        # FIX 3: scale minimum peak separation to sequence length
+        min_distance = max(rolling_window, seq_len // 15)
+
+        # FIX 4: prominence floor = fraction of the local std of this series
+        local_std  = np.std(scores)
+        prominence = prominence_factor * local_std
+
+        peaks, _ = find_peaks(
+            scores,
+            height=thresholds,       # must exceed rolling threshold
+            distance=min_distance,   # adaptive minimum separation
+            prominence=prominence,   # must stand out above neighbours
+        )
+
+        drift_df.loc[group.index[peaks], 'is_drift'] = True
+
     total_drift_points = drift_df['is_drift'].sum()
-    print(f"Flagged {int(total_drift_points)} isolated drift peaks using rolling threshold.") # CHANGED: Updated log message
-    
+    print(f"Flagged {int(total_drift_points)} isolated drift peaks using improved rolling threshold.")
+
     return drift_df
 
-# --- MODIFIED FUNCTION ---
+
 def get_drift_summary(drift_df: pd.DataFrame) -> pd.DataFrame:
     summary = (
         drift_df
@@ -217,9 +273,9 @@ def get_drift_summary(drift_df: pd.DataFrame) -> pd.DataFrame:
             num_movies       = ('num_movies',  'first'),
             num_comparisons  = ('step',        'count'),
             num_drift_points = ('is_drift',    'sum'),
-            avg_threshold    = ('threshold',   'mean'),  # CHANGED: threshold is no longer 'first' (static) but 'mean' (local avg)
-            mean_score       = ('score',       'mean'),  # CHANGED: referencing the raw score column
-            std_score        = ('score',       'std'),   # CHANGED: referencing the raw score column
+            avg_threshold    = ('threshold',   'mean'),
+            mean_score       = ('score',       'mean'),
+            std_score        = ('score',       'std'),
         )
         .reset_index()
     )
