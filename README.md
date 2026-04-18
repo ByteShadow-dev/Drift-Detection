@@ -101,7 +101,7 @@ venv\Scripts\activate
 **3. Install dependencies:**
 
 ```bash
-pip install numpy pandas scipy matplotlib
+pip install -r requirements.txt
 ```
 
 ---
