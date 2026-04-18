@@ -1,5 +1,5 @@
 import pandas as pd
-import numpy as np
+import numpy as np # type: ignore
 import os
 
 from preprocessing import load_and_prepare
@@ -27,7 +27,7 @@ DATASET_PATH   = 'data/ml-latest-small'
 WINDOW_SIZE    = 20
 ACTIVE_REPRESENTATIONS = ['GENRE_SHIFT', 'FCM_CLUSTERS'] # Options: GENRE_SHIFT, FCM_CLUSTERS
 ACTIVE_METRICS         = ['JSD', 'KL']            # Options: JSD, EMD, HELLINGER, TVD, COSINE, KL
-SAMPLE_USERS   = [123, 555, 420]   # Set to a list of IDs for specific plots, e.g. [1, 5, 10]. 
+SAMPLE_USERS   = [599, 555, 420, 443, 53, 532, 12, 98, 432, 213]   # Set to a list of IDs for specific plots, e.g. [1, 5, 10]. 
                         # None = automatically pick top 10 users with most drift.
                         # "all" = plot every single user.
 MAX_USERS      = 50     # Limit the total number of users processed to speed up execution. 
@@ -77,7 +77,7 @@ drift_dfs = []
 for rep in ACTIVE_REPRESENTATIONS:
     for metric in ACTIVE_METRICS:
         print(f"\n--- Running: {rep} + {metric} ---")
-        metric_df = compute_all_users_drift(merged_data, window_size=WINDOW_SIZE, metric=metric, representation=rep)
+        metric_df = compute_all_users_drift(merged_data, window_size=WINDOW_SIZE, metric=metric, representation=rep) # type: ignore
         
         if not metric_df.empty:
             drift_dfs.append(metric_df)
@@ -102,6 +102,28 @@ print(f"STEP 3: Detecting true drift peaks (Threshold: Mean + 2 Std & Peak Detec
 print("=" * 50)
 
 drift_df = flag_drift_points(drift_df)
+
+if not drift_df.empty and 'is_drift' in drift_df.columns:
+    drift_movies = drift_df.loc[drift_df['is_drift'] == True].copy()
+
+    # If specific users are listed, only print drift-point movies for them.
+    if isinstance(SAMPLE_USERS, list):
+        drift_movies = drift_movies.loc[drift_movies['userId'].isin(SAMPLE_USERS)].copy()
+
+    if not drift_movies.empty:
+        print("\nDrift-point pivot movies (with genres):")
+        print(
+            drift_movies[
+                ['userId', 'method', 'step', 'movieId_i', 'title_i', 'genres_i', 'score']
+            ]
+            .sort_values(['userId', 'method', 'step']) # type: ignore
+            .to_string(index=False)
+        )
+    else:
+        if isinstance(SAMPLE_USERS, list):
+            print("No drift points detected for the users listed in SAMPLE_USERS.")
+        else:
+            print("No drift points detected, so no pivot movies to print.")
 
 # ─────────────────────────────────────────────
 # STEP 4 — Summary statistics

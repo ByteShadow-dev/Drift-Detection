@@ -63,12 +63,6 @@ def get_user_representations(user_df: pd.DataFrame, representation: str = 'GENRE
         # Now we record the cluster assignments for the drift analysis.
         # We continue to update centroids (online learning) so the taste model
         # can adapt to very slow, long-term global trends.
-        #
-        # CRITICAL: We convert soft memberships [0.2, 0.7, 0.1] to HARD one-hot
-        # vectors [0, 1, 0]. Soft memberships are "dense" (all bins > 0), which
-        # causes JSD and KL to produce perfectly proportional, identical curves.
-        # Hard assignments provide the category sparsity needed for non-linear
-        # metric behaviors to manifest.
         assignments = []
         for i in range(total_len):
             x_t = data[i].astype(float)
@@ -81,13 +75,9 @@ def get_user_representations(user_df: pd.DataFrame, representation: str = 'GENRE
             u = np.zeros(n_clusters)
             for k in range(n_clusters):
                 u[k] = 1.0 / np.sum((distances[k] / distances) ** (2 / (m - 1)))
+            assignments.append(u)
             
-            # 3. Apply Hard Assignment (winner-take-all) for sparsity
-            hard = np.zeros(n_clusters)
-            hard[np.argmax(u)] = 1.0
-            assignments.append(hard)
-            
-            # 4. Perform Online Update of the taste model
+            # 3. Perform Online Update of the taste model
             for k in range(n_clusters):
                 centroids[k] += learning_rate * (u[k] ** m) * (x_t - centroids[k])
                 
@@ -96,15 +86,6 @@ def get_user_representations(user_df: pd.DataFrame, representation: str = 'GENRE
         raise ValueError(f"Unknown representation mode: {representation}")
 
 def get_window_distribution(data_vectors: np.ndarray, start_idx: int, end_idx: int, epsilon=0.001) -> np.ndarray:
-    """
-    Given a user's transformed vectors, sum slice [start_idx : end_idx], smooth, and normalize.
-
-    Both GENRE_SHIFT (binary genre vectors) and FCM_CLUSTERS (hard one-hot cluster
-    assignments) produce sparse vectors with real zeros.  Summing across a window
-    then adding epsilon creates distributions with near-zero bins for unrepresented
-    categories — this is exactly the sparsity that makes JSD and KL produce
-    genuinely different curve shapes.
-    """
     slice_data = data_vectors[start_idx:end_idx]
     window_sum = slice_data.sum(axis=0)
     smoothed = window_sum + epsilon
@@ -138,6 +119,9 @@ def compute_user_drift_sequence(user_df: pd.DataFrame, data_vectors: np.ndarray,
             'userId': user_id,
             'step': i,
             'timestamp_i': user_df['timestamp'].iloc[i],
+            'movieId_i': user_df['movieId'].iloc[i],
+            'title_i': user_df['title'].iloc[i] if 'title' in user_df.columns else np.nan,
+            'genres_i': user_df['genres'].iloc[i] if 'genres' in user_df.columns else np.nan,
             'score': score,
             'method': method_name
         })
@@ -163,45 +147,76 @@ def compute_all_users_drift(merged_data: pd.DataFrame, window_size: int = 40, me
     
     return drift_df
 
-def flag_drift_points(drift_df: pd.DataFrame, std_multiplier: float = 2.0) -> pd.DataFrame:
+
+def flag_drift_points(
+    drift_df: pd.DataFrame,
+    std_multiplier: float = 2.0,
+    rolling_window: int = 30,
+    std_floor_factor: float = 0.2,
+    prominence_factor: float = 0.5,
+) -> pd.DataFrame:
     """
-    Calculate user-specific thresholds to find the true macroscopic shifts 
-    relative to their baseline fluctuation.
-    Uses Peak Detection (find_peaks) so that a prolonged hill of high score
-    is reduced to just its single highest peak point.
+    Detect statistically significant drift peaks using a causal rolling threshold.
+    Parameters
+    ----------
+    drift_df         : DataFrame from compute_all_users_drift / concat of multiple.
+    std_multiplier   : How many rolling stds above the rolling mean = threshold.
+    rolling_window   : Half-width of the trailing rolling window (full width used).
+    std_floor_factor : Fraction of the global series std used as a minimum std floor.
+                       Prevents threshold collapse in flat regions. (default 0.2)
+    prominence_factor: Fraction of the local std used as minimum peak prominence.
+                       Filters out broad humps. (default 0.5)
     """
     if drift_df.empty:
         return drift_df
-        
-    user_stats = drift_df.groupby(['userId', 'method'])['score'].agg(
-        mean='mean',
-        std=lambda x: x.std(ddof=1)
-    ).reset_index()
-    
-    # If standard deviation is NaN (only 1 datapoint), fill with 0
-    user_stats['std'] = user_stats['std'].fillna(0)
-    user_stats['threshold'] = user_stats['mean'] + (std_multiplier * user_stats['std'])
-    
-    drift_df = drift_df.merge(user_stats, on=['userId', 'method'])
-    drift_df['is_drift'] = False
-    
-    # Apply find_peaks per user and method
+
+    drift_df = drift_df.sort_values(['userId', 'method', 'step']).copy()
+
+    grouped = drift_df.groupby(['userId', 'method'])['score']
+
+    drift_df['rolling_mean'] = grouped.transform(
+        lambda x: x.rolling(window=rolling_window, center=False, min_periods=5).mean()
+    )
+    rolling_std_raw = grouped.transform(
+        lambda x: x.rolling(window=rolling_window, center=False, min_periods=5).std()
+    ).fillna(0)
+
+    global_std = grouped.transform('std').fillna(0)
+    std_floor  = std_floor_factor * global_std
+    drift_df['rolling_std'] = rolling_std_raw.clip(lower=std_floor)
+
+    global_mean = grouped.transform('mean')
+    drift_df['rolling_mean'] = drift_df['rolling_mean'].fillna(global_mean)
+
+    drift_df['threshold'] = drift_df['rolling_mean'] + (std_multiplier * drift_df['rolling_std'])
+    drift_df['is_drift']  = False
+
     for (user_id, method), group in drift_df.groupby(['userId', 'method']):
-        scores = group['score'].values
-        threshold = group['threshold'].iloc[0]
-        
-        # We enforce a distance so that a single broad drift event doesn't yield multiple nearby peaks.
-        peaks, _ = find_peaks(scores, height=threshold, distance=15)
-        
-        # Map the local chunk index back to the global dataframe index
-        global_indices = group.index[peaks]
-        drift_df.loc[global_indices, 'is_drift'] = True
-    
+        scores     = group['score'].values
+        thresholds = group['threshold'].values
+        seq_len    = len(scores)
+
+        # FIX 3: scale minimum peak separation to sequence length
+        min_distance = max(rolling_window, seq_len // 15)
+
+        # FIX 4: prominence floor = fraction of the local std of this series
+        local_std  = np.std(scores)
+        prominence = prominence_factor * local_std
+
+        peaks, _ = find_peaks(
+            scores,
+            height=thresholds,       # must exceed rolling threshold
+            distance=min_distance,   # adaptive minimum separation
+            prominence=prominence,   # must stand out above neighbours
+        )
+
+        drift_df.loc[group.index[peaks], 'is_drift'] = True
+
     total_drift_points = drift_df['is_drift'].sum()
-    total_transitions = len(drift_df)
-    print(f"Flagged {int(total_drift_points)} isolated drift peaks out of {total_transitions} valid window comparisons.")
-    
+    print(f"Flagged {int(total_drift_points)} isolated drift peaks using improved rolling threshold.")
+
     return drift_df
+
 
 def get_drift_summary(drift_df: pd.DataFrame) -> pd.DataFrame:
     summary = (
@@ -211,9 +226,9 @@ def get_drift_summary(drift_df: pd.DataFrame) -> pd.DataFrame:
             num_movies       = ('num_movies',  'first'),
             num_comparisons  = ('step',        'count'),
             num_drift_points = ('is_drift',    'sum'),
-            mean_score       = ('mean',        'first'),
-            std_score        = ('std',         'first'),
-            threshold        = ('threshold',   'first'),
+            avg_threshold    = ('threshold',   'mean'),
+            mean_score       = ('score',       'mean'),
+            std_score        = ('score',       'std'),
         )
         .reset_index()
     )
